@@ -1,32 +1,57 @@
 const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
 const app = express();
 const port = 3000;
 
 // Middleware to parse JSON bodies
 app.use(express.json());
 
-// Sample data
-let todos = [
-    { id: 1, task: "Learn Node.js", completed: false, priority: "medium" },
-    { id: 2, task: "Build a REST API", completed: false, priority: "medium" }
-];
+// SQLite database setup
+const db = new sqlite3.Database('./todos.db', (err) => {
+    if (err) {
+        console.error('Error connecting to the database:', err.message);
+    } else {
+        console.log('Connected to SQLite database.');
+
+        // Create the todos table if it doesn't exist
+        db.run(`
+            CREATE TABLE IF NOT EXISTS todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                completed BOOLEAN DEFAULT 0,
+                priority TEXT DEFAULT 'medium'
+            )
+        `, (err) => {
+            if (err) {
+                console.error('Error creating table:', err.message);
+            }
+        });
+    }
+});
 
 /* Question 1: Add a "Priority" Field to the To-Do API */
 
-// Updated GET /todos to include "priority"
+// GET
 app.get('/todos', (req, res) => {
     const { completed } = req.query;
+    let query = 'SELECT * FROM todos';
+    const params = [];
 
     if (completed !== undefined) {
-        const isCompleted = completed === 'true';
-        const filteredTodos = todos.filter(todo => todo.completed === isCompleted);
-        return res.json(filteredTodos);
+        query += ' WHERE completed = ?';
+        params.push(completed === 'true' ? 1 : 0);
     }
 
-    res.json(todos);
+    db.all(query, params, (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else {
+            res.json(rows);
+        }
+    });
 });
 
-// Updated POST /todos to include "priority" field
+// POST
 app.post('/todos', (req, res) => {
     const { task, priority = "medium" } = req.body;
 
@@ -34,59 +59,68 @@ app.post('/todos', (req, res) => {
         return res.status(400).json({ error: "Task is required" });
     }
 
-    const newTodo = {
-        id: todos.length + 1,
-        task,
-        completed: false,
-        priority
-    };
-
-    todos.push(newTodo);
-    res.status(201).json(newTodo);
+    db.run('INSERT INTO todos (task, completed, priority) VALUES (?, ?, ?)', [task, 0, priority], function (err) {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else {
+            res.status(201).json({ id: this.lastID, task, completed: false, priority });
+        }
+    });
 });
 
-// PUT /todos/:id - Update an existing to-do item
+// PUT - Update an existing to-do item
 app.put('/todos/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const todo = todos.find(t => t.id === id);
-
-    if (!todo) {
-        return res.status(404).send("To-Do item not found");
-    }
-
+    const { id } = req.params;
     const { task, completed, priority } = req.body;
-    todo.task = task || todo.task;
-    todo.completed = completed !== undefined ? completed : todo.completed;
-    todo.priority = priority || todo.priority;
 
-    res.json(todo);
+    db.run(
+        `UPDATE todos SET 
+            task = COALESCE(?, task), 
+            completed = COALESCE(?, completed), 
+            priority = COALESCE(?, priority) 
+        WHERE id = ?`,
+        [task, completed !== undefined ? completed : null, priority, id],
+        function (err) {
+            if (err) {
+                res.status(500).json({ error: err.message });
+            } else if (this.changes === 0) {
+                res.status(404).json({ error: "To-Do item not found" });
+            } else {
+                res.json({ id, task, completed, priority });
+            }
+        }
+    );
 });
 
-/*
-Question 2: Implement a "Complete All" Endpoint
-*/
+/* Question 2: Implement a "Complete All" Endpoint */
 
-// PUT /todos/complete-all - Mark all to-do items as completed
+// PUT - Mark all to-do items as completed
 app.put('/todos/complete-all', (req, res) => {
-    todos = todos.map(todo => ({ ...todo, completed: true }));
-    res.status(200).json({ message: "All to-do items marked as completed" });
+    db.run('UPDATE todos SET completed = 1', [], (err) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else {
+            res.status(200).json({ message: "All to-do items marked as completed" });
+        }
+    });
 });
 
-/*
-Question 3: Filter To-Do Items by Completion Status
-This is already included in the updated GET /todos implementation */
+/* Question 3: Filter To-Do Items by Completion Status
+   This functionality is already included in the GET /todos endpoint above. */
 
-// DELETE /todos/:id - Delete a to-do item
+// DELETE - Delete a to-do item
 app.delete('/todos/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const index = todos.findIndex(t => t.id === id);
+    const { id } = req.params;
 
-    if (index === -1) {
-        return res.status(404).send("To-Do item not found");
-    }
-
-    todos.splice(index, 1);
-    res.status(204).send();
+    db.run('DELETE FROM todos WHERE id = ?', [id], function (err) {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else if (this.changes === 0) {
+            res.status(404).json({ error: "To-Do item not found" });
+        } else {
+            res.status(204).send();
+        }
+    });
 });
 
 // Start the server
